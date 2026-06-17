@@ -1,0 +1,51 @@
+name: Sync daily sales meeting to Notion
+
+# Mirrors Niko's daily sales-standup AI meeting note into the shared Bluon
+# "Internal Sales Meetings" database so the whole sales team can read it.
+#
+# The standup is at 10:00am ET. The AI summary needs a few minutes to finish
+# after the call, so we fire a few times in the late-morning ET window. The
+# script is idempotent (it no-ops if today's entry already exists), so multiple
+# runs are safe — the first run after the summary is ready does the work, the
+# rest exit cleanly. Firing at several UTC offsets also covers EDT/EST so we
+# never have to touch the cron for daylight-saving.
+
+on:
+  schedule:
+    # minute hour(UTC) — 11:15, 11:45, 12:30 ET (EDT) ≈ 15:15, 15:45, 16:30 UTC
+    - cron: "15 15 * * 1-6"
+    - cron: "45 15 * * 1-6"
+    - cron: "30 16 * * 1-6"
+    # one more pass for EST (winter) mornings: 12:30 ET (EST) = 17:30 UTC
+    - cron: "30 17 * * 1-6"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Target day YYYY-MM-DD (blank = today ET)"
+        required: false
+      force:
+        description: "Force create even if an entry exists (true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sales-meeting-sync
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Run sync
+        env:
+          NOTION_PERSONAL_TOKEN: ${{ secrets.NOTION_PERSONAL_TOKEN }}
+          NOTION_BLUON_TOKEN: ${{ secrets.NOTION_BLUON_TOKEN }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then ARGS="$ARGS --date ${{ github.event.inputs.date }}"; fi
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          python sync.py $ARGS
