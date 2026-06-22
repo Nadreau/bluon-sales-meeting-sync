@@ -12,12 +12,14 @@ name: Sync daily sales meeting to Notion
 
 on:
   schedule:
-    # minute hour(UTC) — 11:15, 11:45, 12:30 ET (EDT) ≈ 15:15, 15:45, 16:30 UTC
-    - cron: "15 15 * * 1-6"
-    - cron: "45 15 * * 1-6"
-    - cron: "30 16 * * 1-6"
-    # one more pass for EST (winter) mornings: 12:30 ET (EST) = 17:30 UTC
-    - cron: "30 17 * * 1-6"
+    # Check every 5 minutes through the late-morning window so it syncs ASAP
+    # once the ~10am ET standup's AI summary is ready. The job is idempotent and
+    # status-gated, so the extra runs just no-op. Covers EDT and EST. Mon–Sat.
+    # (GitHub schedules are best-effort and can be delayed under load.)
+    - cron: "30-59/5 14 * * 1-6"   # 10:30–10:55 ET (EDT)
+    - cron: "0-59/5 15 * * 1-6"    # 11:00–11:55 ET (EDT) / 10:00–10:55 ET (EST)
+    - cron: "0-30/5 16 * * 1-6"    # 12:00–12:30 ET (EDT) / 11:00–11:30 ET (EST)
+    - cron: "30 17 * * 1-6"        # 12:30 ET (EST) late-summary fallback
   workflow_dispatch:
     inputs:
       date:

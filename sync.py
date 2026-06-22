@@ -127,12 +127,12 @@ def meeting_start(page):
     return None
 
 
-def find_standup_note(target_date):
-    """Locate the personal meeting-note page for the standup on `target_date`.
+def find_standup_candidates(target_date):
+    """Return ALL morning-window meeting notes for `target_date`, earliest first.
 
-    Returns the page dict, or None if there is no qualifying note. Narrowed by
-    created_time (the note is created when recording starts) and confirmed by the
-    morning ET window parsed from the note's start time.
+    There can be more than one note around 10am (e.g. an empty placeholder note
+    plus the real standup). The caller picks the first that is `notes_ready` and
+    passes the sales-hint guard, rather than blindly taking the earliest.
     """
     day_start = datetime.combine(target_date, datetime.min.time(), ET)
     day_end = day_start + timedelta(days=1)
@@ -158,11 +158,8 @@ def find_standup_note(target_date):
         if lo <= minutes <= hi:
             candidates.append((start, page))
 
-    if not candidates:
-        return None
-    # Earliest meeting inside the morning window is the standup.
     candidates.sort(key=lambda t: t[0])
-    return candidates[0][1]
+    return [c[1] for c in candidates]
 
 
 # Notion's AI meeting-note wrapper block is named differently across API
@@ -404,34 +401,42 @@ def main():
     readable_date = target_date.strftime("%B %-d, %Y")
     print(f"[sync] target day: {readable_date} (ET)")
 
-    page = find_standup_note(target_date)
-    if not page:
+    candidates = find_standup_candidates(target_date)
+    if not candidates:
         print("[sync] no 10am-ET meeting note found for this day — nothing to do.")
         return
-    print(f"[sync] found candidate meeting note: {page['id']}")
+    print(f"[sync] {len(candidates)} candidate 10am note(s) found")
 
-    note = extract_note(page)
+    # Pick the first candidate that is ready AND looks like the sales standup.
+    # Skip empty placeholder notes and non-sales 10am meetings.
+    note, pending = None, False
+    for page in candidates:
+        n = extract_note(page)
+        if not n:
+            continue
+        if n["status"] != "notes_ready":
+            pending = True
+            print(f"[sync]   - {n['title'][:40]!r} not ready (status={n['status']})")
+            continue
+        hint = [h for h in SALES_HINTS if h in n["title"].lower()]
+        if n["title"] and not hint and not args.force:
+            print(f"[sync]   - {n['title'][:40]!r} ready but no sales hint — not the standup")
+            continue
+        note = n
+        break
+
     if not note:
-        print("[sync] page has no meeting_notes block — skipping.")
-        return
-    if note["status"] != "notes_ready":
-        print(f"[sync] AI summary not ready yet (status={note['status']}) — will retry later.")
+        if pending:
+            print("[sync] standup summary not ready yet — will retry on the next run.")
+        else:
+            print("[sync] no qualifying sales standup among today's 10am notes — nothing to do.")
         return
 
     hint = [h for h in SALES_HINTS if h in note["title"].lower()]
-    print(f"[sync] title: {note['title']!r}")
-    print(f"[sync] sales-confidence hints matched: {hint or 'none'}")
+    print(f"[sync] using: {note['title']!r}  (hints: {hint or 'none'})")
     print(f"[sync] action items: {len(note['action_items'])}, "
           f"summary blocks: {len(note['summary_blocks'])}, "
           f"transcript segments: {len(note['transcript_lines'])}")
-
-    # Safety guard: only mirror a clearly-a-sales-call note. The standup's title
-    # reliably contains a sales hint; a named non-sales 10am meeting would not.
-    # If the note has a descriptive title but matches no hint, skip (unless forced).
-    if note["title"] and not hint and not args.force:
-        print("[sync] title present but no sales hint matched — treating as NOT the "
-              "sales standup. Skipping (use --force to override).")
-        return
 
     dup = existing_entry(readable_date)
     if dup and not args.force:
