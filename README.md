@@ -59,9 +59,14 @@ Add two repository secrets:
 
 **Primary — local launchd (`run_local.sh`).** The agent
 `com.bluon.sales-meeting-sync` (`~/Library/LaunchAgents`) fires Mon–Sat at
-10:25, 10:40, 11:00, 11:20 and 11:50 **local** time, so macOS handles EDT/EST
+10:45, 11:00, 11:30 and 12:10 **local** time, so macOS handles EDT/EST
 automatically. `run_local.sh` reads both tokens from `~/.config/notion/` at
 runtime — no secrets in the plist. Logs: `~/.bluon-sales-sync/sync.log`.
+
+The call starts at 10:00 ET, so the first check is 10:45 — anything earlier
+fires mid-meeting and can only no-op. The 11:30 and 12:10 fires are insurance:
+the Notion AI summary is usually ready ~10:20–10:55, but on 7/31/26 it wasn't
+done until ~11:56, so stopping at 11:00 would leave those days to the backstop.
 
 **Backstop — GitHub Actions (`.github/workflows/sync.yml`).** Five spaced
 late-morning fires, Mon–Sat, covering days the laptop is asleep. Also manually

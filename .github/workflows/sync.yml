@@ -23,10 +23,12 @@ on:
     # AI summary is ready by ~10:20–10:55 ET. Dense schedules get deprioritized,
     # so asking for fewer fires gets better delivery than asking for more.
     # Five well-spaced fires, covering EDT and EST. Mon–Sat.
-    - cron: "20 14 * * 1-6"   # 10:20 ET (EDT)
-    - cron: "0 15 * * 1-6"    # 11:00 ET (EDT) / 10:00 ET (EST)
-    - cron: "45 15 * * 1-6"   # 11:45 ET (EDT) / 10:45 ET (EST)
-    - cron: "45 16 * * 1-6"   # 12:45 ET (EDT) / 11:45 ET (EST)
+    # The call STARTS at 10:00 ET, so nothing fires before 10:45 — an earlier
+    # check just burns a run while the meeting is still going.
+    - cron: "45 14 * * 1-6"   # 10:45 ET (EDT)
+    - cron: "15 15 * * 1-6"   # 11:15 ET (EDT) / 10:15 ET (EST)
+    - cron: "0 16 * * 1-6"    # 12:00 ET (EDT) / 11:00 ET (EST)
+    - cron: "0 17 * * 1-6"    # 13:00 ET (EDT) / 12:00 ET (EST)
     - cron: "45 17 * * 1-6"   # 13:45 ET (EDT) / 12:45 ET (EST) late fallback
   workflow_dispatch:
     inputs:
