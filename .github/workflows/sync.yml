@@ -9,17 +9,25 @@ name: Sync daily sales meeting to Notion
 # runs are safe — the first run after the summary is ready does the work, the
 # rest exit cleanly. Firing at several UTC offsets also covers EDT/EST so we
 # never have to touch the cron for daylight-saving.
+#
+# THIS ACTION IS THE BACKSTOP, NOT THE PRIMARY PATH (changed Jul 31 2026).
+# The primary trigger is now the local launchd agent com.bluon.sales-meeting-sync
+# (see run_local.sh), which fires on time. This Action covers days the laptop is
+# asleep. Whichever gets there first wins; the other no-ops.
 
 on:
   schedule:
-    # Check every 5 minutes through the late-morning window so it syncs ASAP
-    # once the ~10am ET standup's AI summary is ready. The job is idempotent and
-    # status-gated, so the extra runs just no-op. Covers EDT and EST. Mon–Sat.
-    # (GitHub schedules are best-effort and can be delayed under load.)
-    - cron: "30-59/5 14 * * 1-6"   # 10:30–10:55 ET (EDT)
-    - cron: "0-59/5 15 * * 1-6"    # 11:00–11:55 ET (EDT) / 10:00–10:55 ET (EST)
-    - cron: "0-30/5 16 * * 1-6"    # 12:00–12:30 ET (EDT) / 11:00–11:30 ET (EST)
-    - cron: "30 17 * * 1-6"        # 12:30 ET (EST) late-summary fallback
+    # Jul 31 2026: was every-5-minutes (~32 fires/day). GitHub only ever
+    # DELIVERED 4/day, and delayed the first one by 60–120 min — the entry
+    # was landing ~12:00–12:40 ET for a 10:00 ET call, even though the Notion
+    # AI summary is ready by ~10:20–10:55 ET. Dense schedules get deprioritized,
+    # so asking for fewer fires gets better delivery than asking for more.
+    # Five well-spaced fires, covering EDT and EST. Mon–Sat.
+    - cron: "20 14 * * 1-6"   # 10:20 ET (EDT)
+    - cron: "0 15 * * 1-6"    # 11:00 ET (EDT) / 10:00 ET (EST)
+    - cron: "45 15 * * 1-6"   # 11:45 ET (EDT) / 10:45 ET (EST)
+    - cron: "45 16 * * 1-6"   # 12:45 ET (EDT) / 11:45 ET (EST)
+    - cron: "45 17 * * 1-6"   # 13:45 ET (EDT) / 12:45 ET (EST) late fallback
   workflow_dispatch:
     inputs:
       date:
