@@ -40,6 +40,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+import transcript_clean
+
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
@@ -376,6 +378,13 @@ def create_entry(note, readable_date, target_date):
                   json={"children": [heading("Transcript", 2), toggle]})
         toggle_id = [b for b in res["results"] if b["type"] == "toggle"][0]["id"]
         tblocks = [paragraph(line) for line in note["transcript_lines"]]
+        # Say so when audio was dropped, rather than quietly shipping a short
+        # transcript — the team should never wonder whether content went missing.
+        if note.get("trimmed_count"):
+            tblocks.append(paragraph(
+                f"— {note['trimmed_count']} trailing segment(s) omitted here: "
+                f"audio recorded after the meeting ended (mic left on). "
+                f"The full recording is intact in the original note. —"))
         append_children(toggle_id, tblocks)
 
     return page
@@ -437,6 +446,20 @@ def main():
     print(f"[sync] action items: {len(note['action_items'])}, "
           f"summary blocks: {len(note['summary_blocks'])}, "
           f"transcript segments: {len(note['transcript_lines'])}")
+
+    # Niko sometimes leaves his mic on, so the recording picks up whatever plays
+    # after the call. Keep that out of the shared team database — his personal
+    # note is never touched. See transcript_clean.py for how this is judged.
+    if not transcript_clean.looks_like_meeting(note["transcript_lines"]):
+        print("[sync] transcript is essentially all non-meeting audio "
+              "(mic left on, no standup content) — nothing to mirror.")
+        return
+
+    kept, removed, reason = transcript_clean.clean_transcript(note["transcript_lines"])
+    if removed:
+        print(f"[sync] 🧹 {reason}")
+        note["transcript_lines"] = kept
+        note["trimmed_count"] = len(removed)
 
     dup = existing_entry(readable_date)
     if dup and not args.force:
