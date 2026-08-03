@@ -60,4 +60,4 @@ jobs:
           ARGS=""
           if [ -n "${{ github.event.inputs.date }}" ]; then ARGS="$ARGS --date ${{ github.event.inputs.date }}"; fi
           if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
-          python sync.py $ARGS
+          python sync.py --all-calls $ARGS

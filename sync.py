@@ -35,6 +35,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -62,6 +63,23 @@ WINDOW_END = (10, 45)    # 10:45 ET
 # Keywords that increase confidence this is the sales standup (informational).
 SALES_HINTS = ["standup", "sales", "account management", "marketing", "team"]
 
+# Aug 3 2026: the database is meant to be the full picture of the team's calls,
+# not just the 10am standup. These identify an INTERNAL team call at any hour —
+# the weekly marketing syncs, the agency sync, partner check-ins, and so on.
+# Deliberately excludes anything that looks like an external prospect/customer
+# call; those belong in HubSpot, not the internal meetings database.
+TEAM_CALL_HINTS = [
+    "standup", "stand-up", "sync", "team meeting", "team call",
+    "sales", "account management", "marketing", "pipeline", "retention",
+    "churn", "partnership", "check-in", "checkin", "weekly", "kickoff",
+    "strategy", "review", "competitive", "agency",
+]
+
+# Never mirror these, whatever else they match — placeholders and test captures.
+JUNK_TITLE_PATTERNS = [
+    "test recording", "no meeting content", "audio captured during",
+]
+
 PERSONAL_TOKEN = os.environ.get("NOTION_PERSONAL_TOKEN", "")
 BLUON_TOKEN = os.environ.get("NOTION_BLUON_TOKEN", "")
 
@@ -83,12 +101,33 @@ def _headers(token):
     }
 
 
-def api(token, method, path, **kwargs):
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def api(token, method, path, _attempts=4, **kwargs):
+    """Call the Notion API, retrying transient failures.
+
+    Notion returns the occasional 502, and a bare raise took down a whole
+    multi-day sweep mid-run (Aug 3 2026). Rate limits (429) and 5xx get a short
+    backoff; anything else is a real error and raises immediately.
+    """
     url = f"https://api.notion.com/{path.lstrip('/')}"
-    r = requests.request(method, url, headers=_headers(token), timeout=60, **kwargs)
-    if r.status_code >= 300:
-        raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:500]}")
-    return r.json() if r.text else {}
+    last = None
+    for attempt in range(_attempts):
+        try:
+            r = requests.request(method, url, headers=_headers(token),
+                                 timeout=60, **kwargs)
+        except requests.RequestException as e:
+            last = f"{type(e).__name__}: {e}"
+        else:
+            if r.status_code < 300:
+                return r.json() if r.text else {}
+            last = f"{r.status_code}: {r.text[:300]}"
+            if r.status_code not in RETRY_STATUSES:
+                raise RuntimeError(f"{method} {path} -> {last}")
+        if attempt < _attempts - 1:
+            time.sleep(2 ** attempt)  # 1s, 2s, 4s
+    raise RuntimeError(f"{method} {path} -> gave up after {_attempts} attempts; last: {last}")
 
 
 def all_children(token, block_id):
@@ -162,6 +201,49 @@ def find_standup_candidates(target_date):
 
     candidates.sort(key=lambda t: t[0])
     return [c[1] for c in candidates]
+
+
+def find_day_notes(target_date):
+    """Every meeting note for `target_date`, any hour, earliest first."""
+    day_start = datetime.combine(target_date, datetime.min.time(), ET)
+    day_end = day_start + timedelta(days=1)
+    body = {
+        "filter": {
+            "and": [
+                {"timestamp": "created_time", "created_time": {"on_or_after": day_start.isoformat()}},
+                {"timestamp": "created_time", "created_time": {"before": day_end.isoformat()}},
+            ]
+        },
+        "page_size": 50,
+    }
+    d = api(PERSONAL_TOKEN, "POST", f"v1/data_sources/{PERSONAL_MEETINGS_DS}/query", json=body)
+    out = []
+    for page in d.get("results", []):
+        start = meeting_start(page)
+        if not start or start.date() != target_date:
+            continue
+        out.append((start, page))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def is_standup_slot(start):
+    """True when a meeting's start time falls in the 10am standup window."""
+    minutes = start.hour * 60 + start.minute
+    return (WINDOW_START[0] * 60 + WINDOW_START[1]) <= minutes <= (
+        WINDOW_END[0] * 60 + WINDOW_END[1])
+
+
+def qualifies_as_team_call(note):
+    """Is this an internal team call worth mirroring to the shared database?"""
+    title = (note["title"] or "").lower()
+    if any(j in title for j in JUNK_TITLE_PATTERNS):
+        return False, "test/placeholder recording"
+    if not any(h in title for h in TEAM_CALL_HINTS):
+        return False, "no team-call hint in title"
+    if not transcript_clean.looks_like_meeting(note["transcript_lines"]):
+        return False, "essentially all non-meeting audio"
+    return True, None
 
 
 # Notion's AI meeting-note wrapper block is named differently across API
@@ -309,15 +391,27 @@ def paragraph(text):
 # ----------------------------------------------------------------------------
 # Destination write (Bluon workspace)
 # ----------------------------------------------------------------------------
-def existing_entry(readable_date):
-    """Return True if an entry for `readable_date` already exists in Bluon DB."""
-    d = api(BLUON_TOKEN, "POST", f"v1/data_sources/{BLUON_DS}/query",
-            json={"page_size": 100})
-    for p in d.get("results", []):
-        name = rich_text_plain(p.get("properties", {}).get("Name", {}).get("title"))
-        if readable_date in name:
-            return p
-    return None
+def existing_entry(entry_name):
+    """Return the row whose Name matches `entry_name` exactly, else None.
+
+    Matching is exact rather than "does the name contain today's date". Once a
+    day can hold several calls (standup + marketing sync + agency sync), a
+    substring match on the date would see the first row and wrongly conclude
+    every later call that day was already synced.
+    """
+    cur, target = None, entry_name.strip().lower()
+    while True:
+        body = {"page_size": 100}
+        if cur:
+            body["start_cursor"] = cur
+        d = api(BLUON_TOKEN, "POST", f"v1/data_sources/{BLUON_DS}/query", json=body)
+        for p in d.get("results", []):
+            name = rich_text_plain(p.get("properties", {}).get("Name", {}).get("title"))
+            if name.strip().lower() == target:
+                return p
+        if not d.get("has_more"):
+            return None
+        cur = d["next_cursor"]
 
 
 def chunk_text_property(items, limit=1900):
@@ -344,15 +438,27 @@ def append_children(page_or_block_id, blocks):
             json={"children": blocks[i:i + 90]})
 
 
-def create_entry(note, readable_date, target_date):
-    title_name = f"Daily Sales Standup — {readable_date}"
+def entry_name_for(note, readable_date, is_standup):
+    """Row name. The 10am standup keeps its historic name so the existing rows
+    stay consistent; other team calls are named by their own topic."""
+    if is_standup:
+        return f"Daily Sales Standup — {readable_date}"
+    topic = (note["title"] or "Team Call").strip()
+    if len(topic) > 80:
+        topic = topic[:77].rstrip() + "..."
+    return f"{topic} — {readable_date}"
+
+
+def create_entry(note, readable_date, target_date, is_standup=True):
+    title_name = entry_name_for(note, readable_date, is_standup)
     props = {
         "Name": {"title": rt(title_name)},
         "Topic": {"rich_text": rt(note["title"])},
         "Action Items": {"rich_text": chunk_text_property(note["action_items"])},
     }
+    what = "the daily sales standup" if is_standup else "an internal team call"
     intro = callout(
-        f"Auto-synced from the daily sales standup recording • {readable_date}. "
+        f"Auto-synced from {what} recording • {readable_date}. "
         "Summary and action items are below; the full transcript is in the toggle "
         "at the bottom."
     )
@@ -393,10 +499,67 @@ def create_entry(note, readable_date, target_date):
 # ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
+def sync_all_team_calls(target_date, readable_date, args):
+    """Mirror EVERY internal team call for a day, not just the 10am standup.
+
+    Added Aug 3 2026: the database is meant to be the full picture of the team's
+    calls. The original one-per-day behaviour meant the weekly marketing syncs,
+    the agency sync and partner check-ins were never captured at all.
+    """
+    day = find_day_notes(target_date)
+    if not day:
+        print(f"[sync] no meeting notes at all for {readable_date} — nothing to do.")
+        return
+
+    created = skipped = 0
+    for start, page in day:
+        n = extract_note(page)
+        label = f"{start.strftime('%H:%M')}"
+        if not n:
+            print(f"[sync]   {label} — no AI meeting block, skipping")
+            continue
+        if n["status"] != "notes_ready":
+            print(f"[sync]   {label} {n['title'][:46]!r} — not ready ({n['status']})")
+            continue
+
+        ok, why = qualifies_as_team_call(n)
+        if not ok and not args.force:
+            print(f"[sync]   {label} {n['title'][:46]!r} — skipped: {why}")
+            continue
+
+        is_standup = is_standup_slot(start)
+        name = entry_name_for(n, readable_date, is_standup)
+        if existing_entry(name) and not args.force:
+            print(f"[sync]   {label} already synced: {name[:60]!r}")
+            skipped += 1
+            continue
+
+        kept, removed, reason = transcript_clean.clean_transcript(n["transcript_lines"])
+        if removed:
+            print(f"[sync]   {label} 🧹 {reason}")
+            n["transcript_lines"] = kept
+            n["trimmed_count"] = len(removed)
+
+        if args.dry_run:
+            print(f"[sync]   {label} WOULD CREATE: {name[:70]!r} "
+                  f"({len(n['action_items'])} items, {len(n['transcript_lines'])} segments)")
+            created += 1
+            continue
+
+        res = create_entry(n, readable_date, target_date, is_standup=is_standup)
+        print(f"[sync]   {label} ✅ {name[:60]!r} -> {res.get('url','')}")
+        created += 1
+
+    verb = "would create" if args.dry_run else "created"
+    print(f"[sync] {readable_date}: {verb} {created}, already present {skipped}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="target day YYYY-MM-DD (default: today ET)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--all-calls", action="store_true",
+                    help="mirror every internal team call that day, not just the 10am standup")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
@@ -409,6 +572,10 @@ def main():
         target_date = datetime.now(ET).date()
     readable_date = target_date.strftime("%B %-d, %Y")
     print(f"[sync] target day: {readable_date} (ET)")
+
+    if args.all_calls:
+        sync_all_team_calls(target_date, readable_date, args)
+        return
 
     candidates = find_standup_candidates(target_date)
     if not candidates:
@@ -461,7 +628,7 @@ def main():
         note["transcript_lines"] = kept
         note["trimmed_count"] = len(removed)
 
-    dup = existing_entry(readable_date)
+    dup = existing_entry(entry_name_for(note, readable_date, True))
     if dup and not args.force:
         print(f"[sync] entry for {readable_date} already exists ({dup['id']}) — skipping.")
         return

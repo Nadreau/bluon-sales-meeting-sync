@@ -38,7 +38,9 @@ if [ -z "$NOTION_PERSONAL_TOKEN" ] || [ -z "$NOTION_BLUON_TOKEN" ]; then
   exit 1
 fi
 
-/usr/bin/python3 "$REPO/sync.py" "$@" >> "$LOG" 2>&1
+# --all-calls: mirror every internal team call that day, not just the
+# 10am standup (Aug 3 2026 - the DB is meant to be the full picture).
+/usr/bin/python3 "$REPO/sync.py" --all-calls "$@" >> "$LOG" 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] exit=$?" >> "$LOG"
 
 tail -n 2000 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
