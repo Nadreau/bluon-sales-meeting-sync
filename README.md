@@ -57,11 +57,28 @@ Add two repository secrets:
 
 ## How it's triggered
 
-**Primary — local launchd (`run_local.sh`).** The agent
+**Primary — local launchd (`run.sh`).** The agent
 `com.bluon.sales-meeting-sync` (`~/Library/LaunchAgents`) fires Mon–Sat at
 10:45, 11:00, 11:30 and 12:10 **local** time, so macOS handles EDT/EST
-automatically. `run_local.sh` reads both tokens from `~/.config/notion/` at
-runtime — no secrets in the plist. Logs: `~/.bluon-sales-sync/sync.log`.
+automatically. It reads both tokens from `~/.config/notion/` at runtime — no
+secrets in the plist. Logs: `~/.bluon-sales-sync/sync.log`.
+
+> ⚠️ **launchd runs the copy in `~/.bluon-sales-sync/repo`, NOT this folder.**
+> macOS TCC protects `~/Desktop`, `~/Documents` and `~/Downloads`. A launchd
+> agent has no grant for them, so pointing it at a script on the Desktop fails
+> with `Operation not permitted` — and fails *invisibly*, because running the
+> same script by hand works (an interactive shell inherits Terminal's grant).
+> That cost three days of silent no-runs on Aug 1–3 2026.
+>
+> The runtime clone `git pull`s before every run, so **commit and push** to
+> ship a change — editing this folder alone does nothing. After changing the
+> schedule or the runner, verify with a real fire, not a manual invocation:
+>
+> ```
+> launchctl kickstart -k gui/$(id -u)/com.bluon.sales-meeting-sync
+> launchctl list | grep sales-meeting-sync   # want exit status 0, not 126
+> cat ~/.bluon-sales-sync/launchd.log        # want empty
+> ```
 
 The call starts at 10:00 ET, so the first check is 10:45 — anything earlier
 fires mid-meeting and can only no-op. The 11:30 and 12:10 fires are insurance:
